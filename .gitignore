@@ -1,0 +1,9 @@
+node_modules/
+captures/
+**/checkpoint.json
+**/manifest.tmp
+.auth/
+.env
+.env.*
+!.env.example
+*.log

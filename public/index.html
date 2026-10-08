@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Website Capture</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="panel" aria-labelledby="title">
+        <p class="tagline">Provisional neutral design</p>
+        <h1 id="title">Website capture</h1>
+
+        <form id="capture-form" novalidate>
+          <label for="url-input">Website URL</label>
+          <input id="url-input" name="url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com" aria-describedby="url-feedback" />
+          <div id="url-feedback" class="feedback" aria-live="polite"></div>
+          <button id="start-button" type="submit">Start capture</button>
+        </form>
+      </section>
+
+      <section id="job-panel" class="panel hidden" aria-live="polite">
+        <div class="panel-header">
+          <h2>Capture status</h2>
+          <span id="job-state" class="state-pill">Ready</span>
+        </div>
+        <dl class="meta-grid">
+          <div>
+            <dt>Lifecycle</dt>
+            <dd id="lifecycle-value">—</dd>
+          </div>
+          <div>
+            <dt>Activity</dt>
+            <dd id="activity-value">—</dd>
+          </div>
+          <div>
+            <dt>Discovered</dt>
+            <dd id="discovered-value">—</dd>
+          </div>
+          <div>
+            <dt>Completed</dt>
+            <dd id="completed-value">—</dd>
+          </div>
+          <div>
+            <dt>Failed</dt>
+            <dd id="failed-value">—</dd>
+          </div>
+          <div>
+            <dt>Blocked</dt>
+            <dd id="blocked-value">—</dd>
+          </div>
+        </dl>
+
+        <div id="control-row" class="control-row" aria-label="Capture controls"></div>
+        <div id="manual-access" class="manual-access hidden"></div>
+      </section>
+
+      <section id="results-panel" class="panel hidden" aria-labelledby="results-title">
+        <h2 id="results-title">Results</h2>
+        <ul id="result-list" class="result-list"></ul>
+      </section>
+    </main>
+
+    <script>
+      const form = document.getElementById('capture-form');
+      const urlInput = document.getElementById('url-input');
+      const feedback = document.getElementById('url-feedback');
+      const startButton = document.getElementById('start-button');
+      const jobPanel = document.getElementById('job-panel');
+      const resultsPanel = document.getElementById('results-panel');
+      const resultList = document.getElementById('result-list');
+      const controlRow = document.getElementById('control-row');
+      const manualAccess = document.getElementById('manual-access');
+      const stateText = document.getElementById('job-state');
+      const lifecycleValue = document.getElementById('lifecycle-value');
+      const activityValue = document.getElementById('activity-value');
+      const discoveredValue = document.getElementById('discovered-value');
+      const completedValue = document.getElementById('completed-value');
+      const failedValue = document.getElementById('failed-value');
+      const blockedValue = document.getElementById('blocked-value');
+
+      let currentJobId = null;
+      let currentEventSource = null;
+
+      function setFeedback(message, kind = 'error') {
+        if (!message) {
+          feedback.textContent = '';
+          feedback.className = 'feedback';
+          return;
+        }
+        feedback.textContent = message;
+        feedback.className = `feedback ${kind}`;
+      }
+
+      function normalizeUrl(value) {
+        const trimmed = value.trim();
+        if (!trimmed) return { ok: false, message: 'Enter a website URL.' };
+        let candidate = trimmed;
+        if (!/^[a-z][a-z0-9+.-]*:/i.test(candidate)) candidate = `https://${candidate}`;
+        try {
+          const parsed = new URL(candidate);
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return { ok: false, message: 'Only HTTP and HTTPS URLs are supported.' };
+          }
+          if (!parsed.hostname || parsed.username || parsed.password) {
+            return { ok: false, message: 'Use a URL without embedded credentials.' };
+          }
+          return { ok: true, value: parsed.href };
+        } catch {
+          return { ok: false, message: 'Enter a valid website URL.' };
+        }
+      }
+
+      function clearJobConnection() {
+        if (currentEventSource) {
+          currentEventSource.close();
+          currentEventSource = null;
+        }
+      }
+
+      function renderControls(snapshot) {
+        controlRow.innerHTML = '';
+        if (!snapshot || !snapshot.jobId) return;
+
+        const state = (snapshot.lifecycle || snapshot.status || '').toLowerCase();
+        const actions = [];
+        if (state === 'running') actions.push({ label: 'Pause', action: 'pause' });
+        if (state === 'paused') actions.push({ label: 'Resume', action: 'resume' });
+        if (state === 'waiting-for-user-action') {
+          actions.push({ label: 'Continue', action: 'continue' });
+        }
+        if (!['complete', 'incomplete', 'cancelled', 'failed'].includes(state)) {
+          actions.push({ label: 'Cancel', action: 'cancel' });
+        }
+
+        for (const action of actions) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'secondary';
+          button.textContent = action.label;
+          button.addEventListener('click', async () => {
+            try {
+              const response = await fetch(`/api/jobs/${snapshot.jobId}/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: action.action })
+              });
+              const payload = await response.json();
+              if (!response.ok) throw new Error(payload.message || 'The action could not be completed.');
+              if (action.action === 'continue') {
+                setFeedback('Continuing after manual verification.', 'success');
+              }
+              await refreshJob(snapshot.jobId);
+            } catch (error) {
+              setFeedback(error.message || 'Unable to update the capture job.', 'error');
+            }
+          });
+          controlRow.appendChild(button);
+        }
+      }
+
+      function renderManualAccess(snapshot) {
+        if (!snapshot || !snapshot.manualAccess) {
+          manualAccess.classList.add('hidden');
+          manualAccess.innerHTML = '';
+          return;
+        }
+        manualAccess.classList.remove('hidden');
+        manualAccess.innerHTML = `
+          <h3>Manual access required</h3>
+          <p>Resolve the login, access challenge or CAPTCHA in your browser, then click Continue.</p>
+          <button type="button" class="primary" id="manual-continue-btn">Continue</button>
+        `;
+        document.getElementById('manual-continue-btn').addEventListener('click', async () => {
+          try {
+            const response = await fetch(`/api/jobs/${snapshot.jobId}/control`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'continue' })
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.message || 'Continuing the job failed.');
+            setFeedback('Manual verification submitted.', 'success');
+            await refreshJob(snapshot.jobId);
+          } catch (error) {
+            setFeedback(error.message || 'Unable to continue the job.', 'error');
+          }
+        });
+      }
+
+      function renderResults(snapshot) {
+        const results = snapshot?.results || [];
+        resultList.innerHTML = '';
+        if (!results.length) {
+          resultsPanel.classList.add('hidden');
+          return;
+        }
+        resultsPanel.classList.remove('hidden');
+        for (const result of results) {
+          const item = document.createElement('li');
+          const status = document.createElement('span');
+          status.className = 'result-status';
+          status.textContent = result.status || 'unknown';
+          item.appendChild(status);
+
+          const details = document.createElement('div');
+          const title = document.createElement('strong');
+          title.textContent = result.url || 'Captured result';
+          details.appendChild(title);
+
+          const links = document.createElement('div');
+          links.className = 'artifact-links';
+
+          const screenshot = result.screenshot;
+          if (screenshot) {
+            const cargo = document.createElement('a');
+            cargo.href = `/api/jobs/${snapshot.jobId}/artifacts?path=${encodeURIComponent(screenshot)}`;
+            cargo.textContent = 'Screenshot';
+            cargo.target = '_blank';
+            cargo.rel = 'noopener noreferrer';
+            links.appendChild(cargo);
+          }
+
+          (result.artifacts || []).forEach(artifact => {
+            const name = artifact.file || artifact.path || 'Artifact';
+            const link = document.createElement('a');
+            link.href = `/api/jobs/${snapshot.jobId}/artifacts?path=${encodeURIComponent(name)}`;
+            link.textContent = name;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            links.appendChild(link);
+          });
+
+          if (result.pdf) {
+            const link = document.createElement('a');
+            link.href = `/api/jobs/${snapshot.jobId}/artifacts?path=${encodeURIComponent(result.pdf)}`;
+            link.textContent = 'PDF';
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            links.appendChild(link);
+          }
+
+          details.appendChild(links);
+          item.appendChild(details);
+          resultList.appendChild(item);
+        }
+      }
+
+      function renderSnapshot(snapshot) {
+        if (!snapshot) return;
+        const counts = snapshot.counts || { captured: 0, partial: 0, failed: 0, blocked: 0, skipped: 0, limited: 0 };
+        const state = snapshot.lifecycle || snapshot.status || 'ready';
+        stateText.textContent = state;
+        lifecycleValue.textContent = state;
+        activityValue.textContent = snapshot.activity || 'Waiting';
+        discoveredValue.textContent = snapshot.discovered ?? '—';
+        completedValue.textContent = (counts.captured ?? 0) + (counts.skipped ?? 0);
+        failedValue.textContent = counts.failed ?? 0;
+        blockedValue.textContent = counts.blocked ?? 0;
+        renderControls(snapshot);
+        renderManualAccess(snapshot);
+        renderResults(snapshot);
+        jobPanel.classList.remove('hidden');
+      }
+
+      async function refreshJob(jobId) {
+        if (!jobId) return;
+        const response = await fetch(`/api/jobs/${jobId}`);
+        if (!response.ok) {
+          throw new Error('The capture job could not be loaded.');
+        }
+        const snapshot = await response.json();
+        renderSnapshot(snapshot);
+      }
+
+      function connectJob(jobId) {
+        clearJobConnection();
+        currentJobId = jobId;
+        localStorage.setItem('website-capture-last-job', jobId);
+        refreshJob(jobId).catch(error => {
+          setFeedback(error.message || 'Unable to retrieve the capture job.', 'error');
+        });
+        currentEventSource = new EventSource(`/api/jobs/${jobId}/events`);
+        currentEventSource.addEventListener('job-event', event => {
+          const payload = JSON.parse(event.data);
+          if (payload?.event) {
+            const eventType = payload.event.type;
+            if (eventType === 'user-action-required') {
+              setFeedback('Manual access is required. Resolve the challenge and continue.', 'warning');
+            }
+          }
+          refreshJob(jobId).catch(() => {});
+        });
+        currentEventSource.addEventListener('error', () => {
+          setFeedback('Realtime updates are temporarily unavailable.', 'warning');
+        });
+      }
+
+      async function submitCapture(event) {
+        event.preventDefault();
+        const validation = normalizeUrl(urlInput.value);
+        if (!validation.ok) {
+          setFeedback(validation.message, 'error');
+          urlInput.focus();
+          return;
+        }
+
+        startButton.disabled = true;
+        try {
+          const response = await fetch('/api/jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: validation.value })
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.message || 'The capture could not be started.');
+          }
+          setFeedback('', 'success');
+          connectJob(payload.jobId);
+        } catch (error) {
+          setFeedback(error.message || 'The capture could not be started.', 'error');
+        } finally {
+          startButton.disabled = false;
+        }
+      }
+
+      function initialize() {
+        form.addEventListener('submit', submitCapture);
+        const savedJob = localStorage.getItem('website-capture-last-job');
+        if (savedJob) {
+          connectJob(savedJob);
+        }
+      }
+
+      initialize();
+    </script>
+  </body>
+</html>

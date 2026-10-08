@@ -1,0 +1,39 @@
+{
+  "startUrl": "https://example.com/",
+  "urls": [],
+  "scopePath": "/",
+  "outputDir": "captures",
+  "capturePng": true,
+  "buildPdf": true,
+  "readinessSelector": "body",
+  "timeoutMs": 15000,
+  "imageTimeoutMs": 5000,
+  "viewport": { "width": 1440, "height": 1000 },
+  "discovery": {
+    "enabled": true,
+    "maxPages": 50,
+    "maxDepth": 3,
+    "maxDurationMs": 120000,
+    "maxLinksPerPage": 500,
+    "maxControlsPerPage": 100
+  },
+  "exploration": {
+    "enabled": true,
+    "maxStates": 8,
+    "maxStateDepth": 3,
+    "maxScrollSteps": 20,
+    "maxScrollRegions": 4,
+    "maxFullPageHeight": 12000,
+    "maxDurationMs": 60000,
+    "settleTimeoutMs": 1200,
+    "settleIntervalMs": 100,
+    "paginationSelectors": []
+  },
+  "retry": { "maxAttempts": 3, "baseDelayMs": 500, "maxDelayMs": 10000 },
+  "access": {
+    "loginSelectors": ["input[type=\"password\"]"],
+    "deniedSelectors": ["[data-access-denied]"],
+    "challengeSelectors": ["iframe[src*=\"captcha\" i]", "[class*=\"captcha\" i]", "[id*=\"captcha\" i]", "[data-sitekey]"]
+  },
+  "browser": { "mode": "launch", "headless": false }
+}
