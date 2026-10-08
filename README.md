@@ -1,19 +1,24 @@
 # Website Capture Tool
 
-Release candidate for a local browser-capture engine with a loopback-only frontend. The project captures bounded website content with durable checkpoints, manual access handling and resumable job control while keeping discovery and browser automation in the local backend rather than in frontend JavaScript.
+[![Verify capture engine](https://github.com/Wbggzade/website-capture-tool2/actions/workflows/test.yml/badge.svg)](https://github.com/Wbggzade/website-capture-tool2/actions/workflows/test.yml)
 
-This repository is a source-only local utility and is not a public web service. It does not contain private course archives, personal accounts, private browsing state, or site authentication credentials. The browser is launched locally and all capture work is bounded by configuration and site scope.
+Browser-accessible website capture tool. The current server runs locally on loopback for development and controlled use; a publicly hosted deployment is not implemented. The project captures bounded website content with durable checkpoints, manual access handling and resumable job control while keeping discovery and browser automation in the Node.js backend rather than frontend JavaScript.
+
+The browser UI offers a user-initiated ZIP download of a finished run. The user's browser saves it to its configured Downloads folder or asks for a destination; the website cannot silently select or write to an arbitrary client folder. In the current loopback setup the capture backend and browser are on the same computer. Hosting the backend for remote visitors requires deployment-specific isolation, abuse protection, quotas and retention/cleanup controls before public access.
+
+This repository contains source and test fixtures, not private captured content, personal accounts, browser sessions or authentication credentials.
 
 ## Purpose and supported scope
 
-The tool is designed for controlled local capture of a single website or a small, in-scope subset of a site. It supports:
+The tool is designed for controlled capture of a single website or a small, in-scope subset of a site through a browser UI or CLI. It supports:
 
 - explicit target URLs and bounded same-site discovery
 - ordered capture of page and state results
 - manual-access interruptions for login and CAPTCHA screens
 - safe retries and checkpoint/resume recovery
 - relative artifact output inside an isolated run directory
-- a small local UI and a CLI-facing engine API
+- a small browser UI, job API, server-sent progress events and CLI-facing engine API
+- a ZIP download containing the public manifest, screenshots and PDF when available, excluding the private checkpoint
 
 It does not guarantee universal website coverage, complete site mirroring, or automatic solving of CAPTCHAs or login flows. The tool is intentionally conservative: unknown controls are not activated, out-of-scope links are not accepted, and budgets are reported explicitly rather than hidden.
 
@@ -28,7 +33,22 @@ The implementation separates the engine from the UI:
 - Checkpoints and resume: [src/checkpoint.mjs](./src/checkpoint.mjs)
 - Browser automation: [src/browser.mjs](./src/browser.mjs), [src/capture.mjs](./src/capture.mjs)
 
-The frontend starts a job, polls current state, receives structured progress events, and exposes the real lifecycle states used by the engine. The backend never invents a parallel workflow; it reflects the same job controller, manual-access pause flow, recovery checkpoints and result status model as the CLI.
+The frontend starts a job, reconnects to its state after refresh, receives structured progress events, and exposes the real lifecycle states used by the engine. After the run finishes it offers a user-initiated ZIP download. The backend never invents a parallel workflow; it reflects the same job controller, manual-access pause flow, recovery checkpoints and result status model as the CLI.
+
+```mermaid
+flowchart LR
+  B[User in browser] -->|URL and job controls| UI[Browser UI]
+  UI -->|HTTP API and progress events| S[Node.js backend]
+  S --> E[Capture engine]
+  E --> D[Discovery and supported state exploration]
+  E --> C[Browser automation and evidence]
+  E --> R[Manifest, screenshots, optional PDF, private checkpoint]
+  R -->|Validated run artifacts| Z[ZIP response]
+  Z -->|User-initiated attachment download| B
+  B -->|Browser download settings| F[Downloads or chosen folder]
+```
+
+In local mode, the Node.js backend runs on the same computer and binds to loopback. If hosted later, the Node.js backend and capture browser would run on the server; only the resulting ZIP would be delivered to the visitor's browser.
 
 ## Current behavior
 
@@ -46,6 +66,7 @@ The frontend starts a job, polls current state, receives structured progress eve
 - Keep lifecycle (`running`, `waiting-for-user-action`, `paused`, `cancelling`, `cancelled`, `complete`, `incomplete`) separate from page and state outcomes.
 - Store a private versioned `checkpoint.json` beside the redacted public `manifest.json`; resume verifies artifacts and recaptures missing or corrupt evidence.
 - Pause on detected login/access/CAPTCHA challenges when run through the CLI or controller API. An operator resolves them manually; the engine verifies access before retrying.
+- After a job finishes, stream a ZIP containing `manifest.json`, screenshots and `archive.pdf` when present. The private `checkpoint.json` is deliberately excluded.
 - Return a nonzero exit status for incomplete, cancelled, limited, blocked, failed or partial work, or export failures.
 
 ## Setup
@@ -69,7 +90,8 @@ Run the local frontend on loopback:
 npm start
 ```
 
-Then open http://127.0.0.1:3000 in a browser to start a capture. The frontend keeps the browser automation in the local backend and uses the existing capture engine for discovery, retries and checkpoint/recovery.
+Then open http://127.0.0.1:3000 in a browser to start a capture. The browser UI sends work to the Node.js backend, which runs browser automation and the existing engine for discovery, retries and checkpoint/recovery.
+After a job finishes, select **Download all results (.zip)**. The download contains the public manifest, screenshots and PDF when available; it deliberately excludes the private `checkpoint.json`. Your browser saves the ZIP to its configured download folder or asks you to choose a location. The app cannot silently select or write to a visitor's Downloads folder. In this checkout the backend is still loopback-only; remote visitors cannot use it until a secure hosted deployment is implemented.
 
 Run the CLI directly:
 
@@ -83,7 +105,7 @@ Continue an interrupted or cancelled run with the same configuration:
 npm run capture -- --resume captures\<run-directory> capture.config.json
 ```
 
-The CLI remains the engine’s lower-level interface; the UI is intentionally small and local-only.
+The CLI remains the engine’s lower-level interface; the UI is intentionally small. The current backend is loopback-only and is not yet a hosted multi-user service.
 
 `retry` defaults to 3 attempts, with a 500 ms exponential base and a 10 second maximum delay. `access` accepts generic CSS selector lists for login, denied-access and supported challenge surfaces. These are detection signals only; they do not solve CAPTCHA or enter credentials.
 
@@ -148,6 +170,8 @@ captures/<timestamp>-<unique-id>/
   archive.pdf                 # when enabled and usable captures exist
 ```
 
+When downloaded, the ZIP is named `website-capture-<opaque-job-id>.zip` and contains `manifest.json`, `screenshots/...` and `archive.pdf` when present. The `GET /api/jobs/:id/archive.zip` route is available only after a job with a run directory has finished. It excludes `checkpoint.json` and arbitrary paths. Partial/incomplete runs can still be downloaded when evidence exists; their outcome labels remain in the manifest.
+
 Page outcomes are `captured`, `partial`, `failed`, `blocked`, `skipped` (known redirect duplicates), and `limited` (for example, a Retry-After delay beyond the configured maximum). Explored states have their own outcomes and action paths. Job lifecycle is separate: `running`, `waiting-for-user-action`, `paused`, `cancelling`, `cancelled`, `complete`, or `incomplete`. Item failures normally leave other queued work eligible to continue; manual access challenges wait for verified resolution; exhausted time/page/state/retry budgets and export failures make the job incomplete; cancellation stops new work and preserves evidence already captured.
 
 `complete` means all admitted pages were captured or deduplicated, export succeeded, no configured exploration limit was reached, and no deferred/unclassified controls remain. It does not prove that an entire website was explored: this bounded crawl only reports observed pages/states. It does not cover every frame, shadow root, asynchronous update, infinite feed item or site. A discovery failure preserves verified screenshot evidence as partial.
@@ -168,27 +192,22 @@ npm run test:browser
 
 For bundled Chromium, leave `CAPTURE_TEST_CHANNEL` unset and install Chromium first. Browser tests use owned local HTTP fixtures, not external sites or personal accounts. They cover capture failures and export, navigation order, query/hash routes, redirected aliases, supported controls, bounded scrolling, retries, manual login resolution, challenge detection, cancellation and resume.
 
-Final local verification for the reconciled Stage 3/4 implementation: 40 unit/job tests and 16 Edge browser integration tests passed on Node 25.8.1. One additional focused browser run was retained for visual inspection of page/state screenshots and the image-only PDF. Remote GitHub Actions/Node 22/Chromium CI has not been run.
+Latest local verification: `npm test` passed 46/46 tests and `npm run test:browser` passed 16/16 fixture browser tests on Node 25.8.1. The ZIP integration test checks attachment headers, expected archive contents and exclusion of the private checkpoint. A real browser download was saved and inspected in the local Downloads folder.
 
-GitHub Actions runs unit/job tests and the local fixture browser checks on Node 22 and Chromium. The workflow is configured; no GitHub run has occurred yet.
+GitHub Actions runs unit/job tests and local fixture browser checks on Node 22 and Chromium through [`.github/workflows/test.yml`](./.github/workflows/test.yml). The initial pushed content commit passed remote CI, but the commit was subsequently rewritten and these ZIP-download changes have not yet been verified by a new remote run. A clean `npm ci` attempt after adding ZIP support was interrupted by Windows `EPERM` while removing Sharp's DLL; clean-install verification for this exact revision remains pending.
 
-## Boundaries and release status
+## Current status and boundaries
 
-1. **Foundation — implemented:** modules, validation, explicit captures, regression tests and CI configuration.
-2. **Discovery — implemented:** same-site queue, page/control inventory, limits, deterministic ordering and loop prevention.
-3. **Exploration — implemented:** supported content states, bounded scrolling, ordered viewport evidence and explicit pagination. See [STAGE-3.md](./STAGE-3.md).
-4. **Execution/recovery — implemented:** safe-boundary controls, bounded retries, private checkpoints, resume, manual access recovery and structured reports. See [STAGE-4.md](./STAGE-4.md).
-5. **Frontend — implemented:** loopback-only local UI, progress and lifecycle reporting, result links and safe artifact access. See [STAGE-5.md](./STAGE-5.md).
-6. **Release verification — implemented locally:** compatibility checks, regression updates and release documentation. See [STAGE-6.md](./STAGE-6.md).
+Implemented: bounded discovery and supported content exploration; real job lifecycle, retries, pause/cancel and checkpoint recovery; a browser UI over a loopback Node.js API; individual artifact access; and user-initiated ZIP downloads with private checkpoints excluded.
 
-This is a release candidate, not a production-ready or public-facing deployment. Visual comparisons remain deferred. Only the listed revalidated content controls are interacted with. No complete/infinite-page guarantee is made. This is a local tool, not a hardened public URL-fetching service; subresource requests are not an SSRF security boundary.
+Not implemented: a publicly hosted multi-user service. The current app is not production-hardened. Before hosting for remote visitors, add and verify tenant/job isolation, URL-fetching and network-abuse defenses, resource quotas, storage retention/cleanup and deployment monitoring. The current `npm audit` reports high-severity advisories in the locked Sharp/libvips dependency chain; review and resolve these before hosting.
+
+Visual comparisons remain deferred. Only the listed revalidated content controls are interacted with. No complete/infinite-page guarantee is made. Subresource requests are not an SSRF security boundary.
 
 ## QA case study
 
-A real defect surfaced during release verification: the example browser config assumed a Windows-specific `msedge` channel even though the project workflow installs Chromium and its local tests run cross-platform. That made a fresh source copy appear to require a browser that many setups do not have. The fix was to make the example configuration portable and add a regression test that validates the browser launch config without an explicit channel. This keeps the project reproducible from a clean `npm ci` install and ensures future config changes do not silently reintroduce a machine-specific assumption.
-
-Another release-risk issue was outdated documentation: the README still described the frontend as future work even though the stage was already implemented. That wording was corrected to describe the actual loopback UI and release-candidate status, and the project documentation was aligned with verified behavior rather than aspirational plan text.
+The ZIP download needed to provide a convenient user action without exposing private recovery state or letting the browser choose server-side paths. The backend selects only the public manifest, screenshots and optional PDF from that job's run directory, then streams them as an attachment. Regression coverage parses the archive, checks its contents and verifies that `checkpoint.json` is absent; the artifact route continues to reject traversal paths. A real browser download was also saved and inspected.
 
 ## CV-ready project description
 
-Local website capture and reporting engine for bounded browser-based content collection. Built with Node.js and Playwright to validate page readiness, discover same-site navigation, replay supported content states, handle manual access pauses, resume interrupted jobs from private checkpoints, and export shareable reports with relative artifacts and explicit incomplete-status labeling. Includes a loopback-only frontend, structured lifecycle controls and regression coverage for URL validation, discovery limits, retries, cancellation/resume, access handling and artifact safety.
+Browser-accessible website capture and reporting tool for bounded content collection. Built with Node.js and Playwright to validate readiness, discover same-site navigation, explore supported content states, handle manual access pauses, resume interrupted jobs from private checkpoints and export reports, screenshots, optional PDF and user-initiated ZIP downloads. The current backend is loopback-only; it is not yet a hosted multi-user service. Regression coverage includes URL validation, discovery limits, retries, cancellation/resume, access handling and artifact/download safety.

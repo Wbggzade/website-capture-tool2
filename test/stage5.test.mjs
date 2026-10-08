@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { inflateRawSync } from 'node:zlib';
 import { startServer } from '../src/server.mjs';
 
 async function makeServer(options = {}) {
@@ -19,9 +20,10 @@ async function createResultRun(runDir, report) {
   await fs.mkdir(runDir, { recursive: true });
   await fs.mkdir(path.join(runDir, 'screenshots'), { recursive: true });
   await fs.writeFile(path.join(runDir, 'manifest.json'), JSON.stringify(report));
+  await fs.writeFile(path.join(runDir, 'checkpoint.json'), JSON.stringify({ private: 'checkpoint-secret' }));
   const screenshot = path.join(runDir, 'screenshots', 'capture.png');
   await fs.writeFile(screenshot, Buffer.from('png-data'));
-  if (report.pdf) await fs.writeFile(path.join(runDir, report.pdf), Buffer.from('pdf-data'));
+  if (report.pdf) await fs.writeFile(path.join(runDir, 'archive.pdf'), Buffer.from('pdf-data'));
   return runDir;
 }
 
@@ -38,6 +40,32 @@ async function waitForStatus(baseUrl, jobId, expectedState, timeoutMs = 4000) {
   throw new Error(`Timed out waiting for job ${jobId} to reach ${expectedState}.`);
 }
 
+function readZipEntries(zip) {
+  const end = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  assert.notEqual(end, -1, 'ZIP end record should be present');
+  const count = zip.readUInt16LE(end + 10);
+  let offset = zip.readUInt32LE(end + 16);
+  const entries = new Map();
+  for (let index = 0; index < count; index += 1) {
+    assert.equal(zip.readUInt32LE(offset), 0x02014b50, 'ZIP central directory entry should be valid');
+    const method = zip.readUInt16LE(offset + 10);
+    const compressedSize = zip.readUInt32LE(offset + 20);
+    const nameLength = zip.readUInt16LE(offset + 28);
+    const extraLength = zip.readUInt16LE(offset + 30);
+    const commentLength = zip.readUInt16LE(offset + 32);
+    const localOffset = zip.readUInt32LE(offset + 42);
+    const name = zip.toString('utf8', offset + 46, offset + 46 + nameLength);
+    const localNameLength = zip.readUInt16LE(localOffset + 26);
+    const localExtraLength = zip.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = zip.subarray(dataStart, dataStart + compressedSize);
+    const data = method === 0 ? compressed : inflateRawSync(compressed);
+    entries.set(name, data);
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
 test('frontend serves the form and rejects invalid URL values', async () => {
   const server = await makeServer();
   try {
@@ -46,6 +74,7 @@ test('frontend serves the form and rejects invalid URL values', async () => {
     assert.equal(page.status, 200);
     assert.match(html, /Website capture/i);
     assert.match(html, /Start capture/i);
+    assert.match(html, /Download all results \(\.zip\)/i);
 
     const css = await fetch(`${server.baseUrl}/styles.css`);
     const cssText = await css.text();
@@ -104,8 +133,8 @@ test('successful captures expose result links and reject unsafe artifact paths',
       discovered: 1,
       attempted: 1,
       pending: 0,
-      results: [{ url: 'https://example.com/', status: 'captured', screenshot: 'screenshots/capture.png', artifacts: [{ file: 'screenshots/capture.png' }], pdf: 'report.pdf' }],
-      pdf: 'report.pdf'
+      results: [{ url: 'https://example.com/', status: 'captured', screenshot: 'screenshots/capture.png', artifacts: [{ file: 'screenshots/capture.png' }], pdf: 'archive.pdf' }],
+      pdf: 'archive.pdf'
     };
     await createResultRun(jobDir, report);
     options.onEvent?.({ type: 'job-finished', lifecycle: 'complete', status: 'complete', timestamp: new Date().toISOString() });
@@ -121,9 +150,23 @@ test('successful captures expose result links and reject unsafe artifact paths',
     assert.equal(created.status, 202);
     const payload = await created.json();
     const jobId = payload.jobId;
+    const notReady = await fetch(`${server.baseUrl}/api/jobs/${jobId}/archive.zip`);
+    assert.equal(notReady.status, 409);
     const report = await waitForStatus(server.baseUrl, jobId, 'complete');
     assert.equal(report.status, 'complete');
     assert.equal(report.results.length, 1);
+    assert.equal(report.downloadAvailable, true);
+    assert.equal('runDir' in report, false);
+
+    const earlyArchive = await fetch(`${server.baseUrl}/api/jobs/${jobId}/archive.zip`);
+    assert.equal(earlyArchive.status, 200);
+    assert.equal(earlyArchive.headers.get('content-type'), 'application/zip');
+    assert.match(earlyArchive.headers.get('content-disposition'), /attachment; filename="website-capture-/);
+    const archiveEntries = readZipEntries(Buffer.from(await earlyArchive.arrayBuffer()));
+    assert.deepEqual([...archiveEntries.keys()].sort(), ['archive.pdf', 'manifest.json', 'screenshots/capture.png']);
+    assert.equal(archiveEntries.get('screenshots/capture.png').toString(), 'png-data');
+    assert.equal(archiveEntries.has('checkpoint.json'), false);
+    assert.equal(archiveEntries.get('archive.pdf').toString(), 'pdf-data');
 
     const artifact = await fetch(`${server.baseUrl}/api/jobs/${jobId}/artifacts?path=${encodeURIComponent('screenshots/capture.png')}`);
     assert.equal(artifact.status, 200);
@@ -222,4 +265,3 @@ test('manual access events provide a continue action', async () => {
     await server.cleanup();
   }
 });
-

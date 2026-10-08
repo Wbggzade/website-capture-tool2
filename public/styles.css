@@ -242,6 +242,27 @@ button[disabled] {
   color: var(--primary-strong);
 }
 
+.download-link {
+  display: inline-block;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  padding: 11px 15px;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.download-link:hover {
+  background: var(--primary-strong);
+}
+
+.download-note {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 700px) {
   body {
     padding: 16px 12px;

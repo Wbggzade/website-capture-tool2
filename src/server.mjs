@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { ZipArchive } from 'archiver';
 import { buildPdf } from './export.mjs';
 import { capturePage } from './capture.mjs';
 import { openBrowser } from './browser.mjs';
@@ -75,6 +77,43 @@ function safeRelativeArtifact(runDir, input) {
   return fullPath;
 }
 
+async function listDownloadFiles(runDir) {
+  const files = [];
+  const addFile = async relativePath => {
+    const fullPath = safeRelativeArtifact(runDir, relativePath);
+    const info = await fs.lstat(fullPath);
+    if (info.isFile()) files.push({ fullPath, relativePath: relativePath.split(path.sep).join('/') });
+  };
+
+  await addFile('manifest.json');
+  try {
+    await addFile('archive.pdf');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const walkScreenshots = async (directory, relativeDirectory) => {
+    let entries;
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT' && relativeDirectory === 'screenshots') return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const relativePath = path.join(relativeDirectory, entry.name);
+      const fullPath = safeRelativeArtifact(runDir, relativePath);
+      if (entry.isDirectory()) {
+        await walkScreenshots(fullPath, relativePath);
+      } else if (entry.isFile()) {
+        await addFile(relativePath);
+      }
+    }
+  };
+  await walkScreenshots(path.join(runDir, 'screenshots'), 'screenshots');
+  return files;
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -108,10 +147,11 @@ async function servePublicFile(res, fileName) {
 
 function getJobState(job) {
   const report = job.report ?? {};
+  const lifecycle = job.lifecycle ?? report.lifecycle ?? 'running';
   return {
     jobId: job.id,
     url: job.url,
-    lifecycle: job.lifecycle ?? report.lifecycle ?? 'running',
+    lifecycle,
     status: report.status ?? job.status ?? 'running',
     activity: job.activity ?? 'Starting',
     counts: report.counts ?? { captured: 0, partial: 0, failed: 0, blocked: 0, skipped: 0, limited: 0 },
@@ -121,7 +161,7 @@ function getJobState(job) {
     planned: report.planned ?? 0,
     limited: report.limited ?? 0,
     manualAccess: !!(report.events && report.events.some(event => event.type === 'user-action-required')) || job.manualAccess,
-    runDir: job.runDir ?? null,
+    downloadAvailable: !!job.runDir && ['complete', 'incomplete', 'cancelled', 'failed'].includes(lifecycle),
     results: Array.isArray(report.results) ? report.results : [],
     pdf: report.pdf ?? null,
     exportError: report.exportError ?? null,
@@ -280,6 +320,32 @@ export async function startServer(options = {}) {
           res.write(`event: snapshot\ndata: ${JSON.stringify(getJobState(job))}\n\n`);
           job.streams.add(res);
           req.on('close', () => job.streams.delete(res));
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === `/api/jobs/${jobId}/archive.zip`) {
+          if (!job.runDir || !job.report || ['running', 'paused', 'waiting-for-user-action', 'cancelling'].includes(job.lifecycle)) {
+            sendJson(res, 409, { code: 'RESULTS_NOT_READY', message: 'Results can be downloaded after the capture job has finished.' });
+            return;
+          }
+          const files = await listDownloadFiles(job.runDir);
+          const archive = new ZipArchive({ zlib: { level: 6 } });
+          archive.on('warning', error => archive.emit('error', error));
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="website-capture-${jobId}.zip"`,
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff'
+          });
+          try {
+            const streaming = pipeline(archive, res);
+            for (const file of files) archive.file(file.fullPath, { name: file.relativePath });
+            await archive.finalize();
+            await streaming;
+          } catch (error) {
+            if (res.headersSent) res.destroy(error);
+            else sendJson(res, 500, { code: 'ARCHIVE_FAILED', message: 'The result archive could not be created.' });
+          }
           return;
         }
 

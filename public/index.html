@@ -58,6 +58,8 @@
 
       <section id="results-panel" class="panel hidden" aria-labelledby="results-title">
         <h2 id="results-title">Results</h2>
+        <a id="download-results" class="download-link hidden" href="#" download>Download all results (.zip)</a>
+        <p class="download-note">Your browser saves the ZIP to its configured download location or asks where to save it.</p>
         <ul id="result-list" class="result-list"></ul>
       </section>
     </main>
@@ -70,6 +72,7 @@
       const jobPanel = document.getElementById('job-panel');
       const resultsPanel = document.getElementById('results-panel');
       const resultList = document.getElementById('result-list');
+      const downloadResults = document.getElementById('download-results');
       const controlRow = document.getElementById('control-row');
       const manualAccess = document.getElementById('manual-access');
       const stateText = document.getElementById('job-state');
@@ -192,7 +195,19 @@
       function renderResults(snapshot) {
         const results = snapshot?.results || [];
         resultList.innerHTML = '';
-        if (!results.length) {
+        const finished = ['complete', 'incomplete', 'cancelled', 'failed'].includes(
+          (snapshot.lifecycle || snapshot.status || '').toLowerCase()
+        );
+        const hasRun = !!snapshot.jobId && !!snapshot.downloadAvailable && finished;
+        if (hasRun) {
+          downloadResults.href = `/api/jobs/${snapshot.jobId}/archive.zip`;
+          downloadResults.download = `website-capture-${snapshot.jobId}.zip`;
+          downloadResults.classList.remove('hidden');
+        } else {
+          downloadResults.removeAttribute('href');
+          downloadResults.classList.add('hidden');
+        }
+        if (!results.length && !hasRun) {
           resultsPanel.classList.add('hidden');
           return;
         }
